@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.venv/
+venv/
+
+# macOS
+.DS_Store
+
+# Local models (download separately, see README)
+model/
+
+# Large raw data and run checkpoints
+*.partial
+*.log
+nohup.out
+
+# Local archive of old experiments and scratch code
+_archive/

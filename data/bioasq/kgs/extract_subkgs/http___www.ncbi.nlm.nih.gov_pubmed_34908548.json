@@ -1,0 +1,1 @@
+{"759aa48a5e62": [["GBM", "AUROC", "0.94-1."], ["SVM", "had AUROC", "0.83"], ["RF", "had AUROC", "0.96"], ["GBM", "had AUROC", "0.96"], ["CNN", "had AUROC", "0.96"]]}
