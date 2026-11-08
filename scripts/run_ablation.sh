@@ -15,7 +15,7 @@ cd "$(dirname "$0")/../code"
 for r in ${RETRIEVERS[@]}; do
   out=../output/bioasq/ablation/bioasq200_${r}.json
   echo "=== ${r} -> ${out}"
-  python kg_rag_distractor.py --dataset bioasq --retriever "${r}" \
+  python kg_rag_distractor.py  --retriever "${r}" \
       --data_path "${DATA}" --kg_dir "${KG}" --result_path "${out}"
   python evaluate.py "${out}" "${DATA}" --top_k 10
 done
