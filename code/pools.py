@@ -17,10 +17,28 @@ def stable_seed(qid, base_seed=42):
     return base_seed + int(digest[:8], 16)
 
 
-def get_distractors(qid, all_passage_ids, n, base_seed=42):
-    """Pick n random distractor passages from all_passage_ids, using a stable seed based on query ID."""
+def get_distractors(qid, all_passage_ids, n, base_seed=42, exclude=()):
+    """Pick n random distractor passages from all_passage_ids, using a stable seed based on query ID.
+    Distractors overlapped question's own gold snippets are exlcuded."""
     rng = random.Random(stable_seed(qid, base_seed))
-    return rng.sample(sorted(all_passage_ids), n)
+    candidates = sorted(set(all_passage_ids) - set(exclude))
+    return rng.sample(candidates, n)
+
+
+def gold_pmids(question):
+    """Get the gold PMIDs for a BioASQ question, from its snippets."""
+    ids = set()
+    for s in question["snippets"]:
+        last = s["document"].rstrip("/").split("/")[-1]
+        if last.isdigit():
+            ids.add(int(last))
+    return ids
+
+
+def skip_empty_passages(text, min_words=5):
+    """False if the passage is empty or contains only whitespace, True otherwise."""
+    t = (text or "").strip()
+    return t != "" and t.lower() != "nan" and len(t.split()) >= min_words
 
 
 def load_passage_ids():
@@ -28,7 +46,7 @@ def load_passage_ids():
     from datasets import load_dataset
 
     corpus = load_dataset("rag-datasets/rag-mini-bioasq", "text-corpus")["passages"]
-    return [r["id"] for r in corpus]
+    return [r["id"] for r in corpus if skip_empty_passages(r["passage"])]
 
 
 def main():
@@ -49,7 +67,7 @@ def main():
     pools = {}
     for q in questions:
         qid = str(q["id"])
-        pools[qid] = get_distractors(qid, ids, args.n, args.seed)
+        pools[qid] = get_distractors(qid, ids, args.n, args.seed, exclude=gold_pmids(q))
 
     # Save the distractor pools to JSON file
     with open(args.out, "w") as f:
