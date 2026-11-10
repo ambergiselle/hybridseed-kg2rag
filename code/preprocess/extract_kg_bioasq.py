@@ -1,106 +1,173 @@
-"""Extract KG triplets for the BioASQ distractor setting.
+"""Extract KG triplets for the BioASQ distractor setting (Thesis II version).
 
-For each question in data/bioasq/factoid_subset_200.json, builds the candidate
-pool (native snippets + rag-mini-bioasq distractors) and asks the LLM to extract
-<head##relation##tail> triplets from every chunk. Output: one JSON per document
-in data/bioasq/kgs/extract_subkgs/, mapping chunk_key -> [[h, r, t], ...].
-Already-extracted chunks are skipped, so the script can be resumed.
+Reads the questions of one split plus the SAVED distractor file, so it extracts
+exactly the passages the pipeline will use.
 
-Requires an OpenAI-compatible LLM server (e.g. vLLM) at localhost:8000.
-Run from this folder:  python extract_kg_bioasq.py
+Output: one JSON per document in
+data/bioasq/kgs/extract_subkgs/, mapping chunk_key -> [[h, r, t], ...].
 
-NOTE: this uses n_distractors=15, while kg_rag_distractor.py defaults to 100
-for bioasq -- see README "Known issues".
+Passages already processed (including ones with no triplets, saved as [])
+are skipped, so the script is safe to stop and resume, and passages shared
+between batches are only extracted once.
+
+Run:
+    python extract_kg_bioasq.py --split dev
+    python extract_kg_bioasq.py --split test --start 0    --end 500
+    python extract_kg_bioasq.py --split test --start 500  --end 1000
+    python extract_kg_bioasq.py --split test --start 1000 --end 1400
 """
 
-import os
+import argparse
 import json
-import random as rng
-import hashlib
-from tqdm import tqdm
+import os
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 from datasets import load_dataset
 from llama_index.llms.openai_like import OpenAILike
+from pools import build_pool
+from tqdm import tqdm
+
+DATA = "../../data/bioasq"
+
 
 def extract_triplets(llm, ctx, max_chars=3000):
-    ctx = ctx[:max_chars]
-    query = f'Extract triplets informative from the text following the examples. Make sure the triplet texts are only directly from the given text! Complete directly and strictly following the instructions without any additional words, line break nor space!\n{"-"*20}\nText: Aspirin is a nonsteroidal anti-inflammatory drug (NSAID) commonly used to reduce pain, fever, and inflammation by inhibiting cyclooxygenase enzymes.\nTriplets:<Aspirin##is a##NSAID>$$<Aspirin##inhibits##cyclooxygenase enzymes>$$<Aspirin##used to reduce##pain>$$<Aspirin##used to reduce##fever>$$<Aspirin##used to reduce##inflammation>$$\n{"-"*20}\nText: Mutations in the BRCA1 gene are strongly associated with an increased risk of breast and ovarian cancer in affected individuals.\nTriplets:<BRCA1##associated with##breast cancer>$$<BRCA1##associated with##ovarian cancer>$$<BRCA1 mutations##increases risk of##breast cancer>$$\n{"-"*20}\nText: {ctx}\nTriplets:'
-    resp = llm.complete(query)
+    """Extract triplets from a given context using the provided LLM."""
+    ctx = ctx[:max_chars]  # Keep only first 3000 chars to avoid hitting max token limit
+
+    query = f"Extract triplets informative from the text following the examples. Make sure the triplet texts are only directly from the given text! Complete directly and strictly following the instructions without any additional words, line break nor space!\n{'-' * 20}\nText: Aspirin is a nonsteroidal anti-inflammatory drug (NSAID) commonly used to reduce pain, fever, and inflammation by inhibiting cyclooxygenase enzymes.\nTriplets:<Aspirin##is a##NSAID>$$<Aspirin##inhibits##cyclooxygenase enzymes>$$<Aspirin##used to reduce##pain>$$<Aspirin##used to reduce##fever>$$<Aspirin##used to reduce##inflammation>$$\n{'-' * 20}\nText: Mutations in the BRCA1 gene are strongly associated with an increased risk of breast and ovarian cancer in affected individuals.\nTriplets:<BRCA1##associated with##breast cancer>$$<BRCA1##associated with##ovarian cancer>$$<BRCA1 mutations##increases risk of##breast cancer>$$\n{'-' * 20}\nText: {ctx}\nTriplets:"
+
+    resp = llm.complete(query)  # Send to vLLM for triplet extraction
     resp = resp.text
+
     triplets = set()
-    for triplet_text in resp.split('$$'):
+    for triplet_text in resp.split("$$"):
+        # Drop triplets that are too short
         if len(triplet_text) <= 6:
             continue
+
+        # To remove <> brackets and split by '##' to get h, r, t
         triplet_text = triplet_text[1:-1]
-        tokens = triplet_text.split('##')
+        tokens = triplet_text.split("##")
+
+        # To ensure only valid triplets (h,r,t)
         if len(tokens) != 3:
             continue
+
         h, r, t = (tok.strip() for tok in tokens)
-        if ('no ' in h) or ('no ' in t) or ('unknown' in h.lower()) or ('unknown' in t.lower()) or ('null' in h.lower()) or ('null' in t.lower()) or (h == t):
+
+        # Drop triplets with 'no', 'unknown', 'null' or self loops
+        if (
+            ("no " in h)
+            or ("no " in t)
+            or ("unknown" in h.lower())
+            or ("unknown" in t.lower())
+            or ("null" in h.lower())
+            or ("null" in t.lower())
+            or (h == t)
+        ):
             continue
+        # Hallucination checking: if neither h nor t are in the context, drop the triplet
         if (r not in ctx) and (t not in ctx):
             continue
         triplets.add((h, r, t))
+
     return [[h, r, t] for (h, r, t) in triplets]
 
-def build_candidate_pool(sample, passage_lookup, all_passage_ids, n_distractors=15, seed=42):
-    seed_offset = sample['id'] if isinstance(sample['id'], int) else (hash(sample['id']) % 100000)
-    rng.seed(seed + seed_offset)
-    native_chunks = []
-    for snip in sample['snippets']:
-        doc_key = snip['document'].replace("/", "_").replace(":", "_")
-        snippet_key = hashlib.md5(snip['text'].encode('utf-8')).hexdigest()[:12]
-        native_chunks.append((doc_key, snippet_key, snip['text']))
-    distractor_ids = rng.sample(all_passage_ids, n_distractors)
-    distractor_chunks = [(f'ragmini_{pid}', f'ragmini_{pid}', passage_lookup[pid]) for pid in distractor_ids]
-    return native_chunks + distractor_chunks
 
-with open('../../data/bioasq/factoid_subset_200.json') as f:
-    subset = json.load(f)
+def load_existing(out_dir, doc_key):
+    """Load saved triplets for one document"""
+    path = os.path.join(out_dir, f"{doc_key}.json")
+    if os.path.exists(path):
+        with open(path) as f:
+            return json.load(f)
+    return {}
 
-corpus = load_dataset("rag-datasets/rag-mini-bioasq", "text-corpus")['passages']
-passage_lookup = {row['id']: row['passage'] for row in corpus}
-all_passage_ids = list(passage_lookup.keys())
 
-llm = OpenAILike(
-    model="meta-llama/Llama-3.1-8B-Instruct",
-    api_base="http://localhost:8000/v1",
-    api_key="dummy",
-    is_chat_model=True,
-    request_timeout=120,
-    temperature=0.0,
-    max_tokens=64
-)
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--split", choices=["dev", "test"], required=True)
+    p.add_argument("--start", type=int, default=0)
+    p.add_argument("--end", type=int, default=None)
+    p.add_argument("--distractors", default=f"{DATA}/distractors_15.json")
+    p.add_argument("--out_dir", default=f"{DATA}/kgs/extract_subkgs")
+    p.add_argument(
+        "--workers", type=int, default=8, help="parallel requests sent to vLLM"
+    )
 
-out_dir = '../../data/bioasq/kgs/extract_subkgs'
-os.makedirs(out_dir, exist_ok=True)
-count = 0
+    a = p.parse_args()
 
-for sample in tqdm(subset):
-    candidates = build_candidate_pool(sample, passage_lookup, all_passage_ids, n_distractors=15)
-    for doc_key, snippet_key, text in candidates:
-        out_path = os.path.join(out_dir, f'{doc_key}.json')
+    # 1. Load corresponding data
+    if a.split == "dev":
+        split_file = f"{DATA}/dev_200.json"
+    else:
+        split_file = f"{DATA}/test_1400.json"
 
-        if os.path.exists(out_path):
-            with open(out_path) as f:
-                existing = json.load(f)
-        else:
-            existing = {}
+    with open(split_file) as f:
+        questions = json.load(f)[a.start : a.end]
+    with open(a.distractors) as f:
+        distractors = json.load(f)
 
-        if snippet_key in existing:
-            continue
+    corpus = load_dataset("rag-datasets/rag-mini-bioasq", "test-corpus")["passages"]
+    passage_lookup = {row["id"]: row["passage"] for row in corpus}
 
-        try:
-            ext_triplets = extract_triplets(llm, text)
-        except Exception as e:
-            print(f'Skipping {doc_key}/{snippet_key} due to error: {e}')
-            continue
+    os.makedirs(a.out_dir, exist_ok=True)
 
-        if len(ext_triplets) == 0:
-            continue
+    # 2. Collect every passage in this batch that still needs triplets
+    todo, seen = [], set()
 
-        existing[snippet_key] = ext_triplets
-        with open(out_path, 'w') as f:
-            json.dump(existing, f)
-        count += 1
+    for q in questions:
+        for doc_key, chunk_key, text in build_pool(
+            q, distractors[str(q["id"])], passage_lookup
+        ):
+            if (doc_key, chunk_key) in seen:
+                continue
+            seen.add((doc_key, chunk_key))
+            if chunk_key not in load_existing(a.out_dir, doc_key):
+                todo.append((doc_key, chunk_key, text))
 
-print(f'Newly extracted passage/snippet KGs: {count}')
+    print(
+        f"{a.split} questions {a.start}-{a.start + len(questions)}:"
+        f"{len(seen)} unique passages, {len(todo)} need extraction"
+    )
+
+    llm = OpenAILike(
+        model="meta-llama/Llama-3.1-8B-Instruct",
+        api_base="http://locaclhost:8000/v1",
+        api_key="dummy",
+        is_chat_model=True,
+        request_timeout=120,
+        temperature=0.0,
+        max_tokens=64,
+    )
+
+    # 3. Send LLM requests in parallel to extract triplets [h,r,t]
+    t0, done, empty, failed = time.time(), 0, 0, 0
+
+    with ThreadPoolExecutor(max_workers=a.workers) as pool:
+        futures = {
+            pool.submit(extract_triplets, llm, text): (doc_key, chunk_key)
+            for doc_ket, chunk_key, text in todo
+        }
+        for fut in tqdm(as_completed(futures), total=len(futures)):
+            doc_key, chunk_key = futures[fut]
+            try:
+                triplets = fut.result()
+            except Exception as e:  # noqa: BLE001 -- log and skip any failed passage; it is retried next run
+                failed += 1
+                print(f"Failed {doc_key}/{chunk_key}:{e}")
+                continue
+            if not triplets:
+                empty += 1
+            existing = load_existing(a.out_dir, doc_key)
+            existing[chunk_key] = triplets
+            with open(os.path.join(a.out_dir, f"{doc_key}.json"), "w") as f:
+                json.dump(existing, f)
+            done += 1
+
+    print(f"Extracted {done}, no triplets {empty}, failed {failed}")
+    print(f"in {(time.time() - t0) / 60:.1f} min")
+
+
+if __name__ == "__main__":
+    main()
