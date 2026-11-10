@@ -21,10 +21,15 @@ import argparse
 import json
 import os
 import time
+import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from datasets import load_dataset
 from llama_index.llms.openai_like import OpenAILike
+
+sys.path.insert(
+    0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+)  # import from code/
 from pools import build_pool
 from tqdm import tqdm
 
@@ -108,7 +113,7 @@ def main():
     with open(a.distractors) as f:
         distractors = json.load(f)
 
-    corpus = load_dataset("rag-datasets/rag-mini-bioasq", "test-corpus")["passages"]
+    corpus = load_dataset("rag-datasets/rag-mini-bioasq", "text-corpus")["passages"]
     passage_lookup = {row["id"]: row["passage"] for row in corpus}
 
     os.makedirs(a.out_dir, exist_ok=True)
@@ -133,7 +138,7 @@ def main():
 
     llm = OpenAILike(
         model="meta-llama/Llama-3.1-8B-Instruct",
-        api_base="http://locaclhost:8000/v1",
+        api_base="http://127.0.0.1:8000/v1",
         api_key="dummy",
         is_chat_model=True,
         request_timeout=120,

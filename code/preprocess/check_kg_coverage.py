@@ -20,7 +20,7 @@ DATA = "../../data/bioasq"
 p = argparse.ArgumentParser()
 p.add_argument("--split", choices=["dev", "test"], required=True)
 p.add_argument("--distractors", default=f"{DATA}/distractors_15.json")
-p.add_argument("--split", default=f"{DATA}/kgs/extract_subkgs.json")
+p.add_argument("--kg_dir", default=f"{DATA}/kgs/extract_subkgs")
 a = p.parse_args()
 
 with open(
@@ -57,7 +57,7 @@ for q in questions:
             done += 1
             q_done += 1
             with_triplets += bool(kg[chunk_key])
-        full_questions += q_done == len(chunks)
+    full_questions += q_done == len(chunks)
 
 print(f"{a.split}: {len(questions)} questions, {total} pooled passages")
 print(f"processed {done}/{total}({100 * done / total:.1f}%)")
