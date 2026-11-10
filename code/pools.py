@@ -25,6 +25,29 @@ def get_distractors(qid, all_passage_ids, n, base_seed=42, exclude=()):
     return rng.sample(candidates, n)
 
 
+def doc_key_from_url(url):
+    return url.replace("/", "_").replace(":", "_")
+
+
+def snippet_key(text):
+    return hashlib.md5(text.encode("utf-8")).hexdigest()[:12]
+
+
+def build_pool(sample, distractor_ids, passage_lookup):
+    """Candidate pool for one question: (doc_key, chunk_key, text) for every gold
+    snippet, then every distractor. The pipeline, KG extraction and coverage check
+    all use this, so their keys always match."""
+    native = [
+        (doc_key_from_url(s["document"]), snippet_key(s["text"]), s["text"])
+        for s in sample["snippets"]
+    ]
+    distractors = [
+        (f"ragmini_{pid}", f"ragmini_{pid}", passage_lookup[pid])
+        for pid in distractor_ids
+    ]
+    return native + distractors
+
+
 def gold_pmids(question):
     """Get the gold PMIDs for a BioASQ question, from its snippets."""
     ids = set()

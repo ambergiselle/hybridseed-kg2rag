@@ -25,7 +25,6 @@ Example:
 """
 
 import argparse
-import hashlib
 import logging
 import os
 
@@ -38,7 +37,7 @@ from llama_index.core.response_synthesizers import ResponseMode
 from llama_index.core.schema import TextNode
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.llms.openai_like import OpenAILike
-from pools import get_distractors
+from pools import build_pool, get_distractors
 from retrievers import RETRIEVER_CHOICES, build_retriever
 from tqdm import tqdm
 from util.kg_post_processor import (
@@ -129,25 +128,10 @@ def load_ragmini_corpus():
 # Candidate Pool Construction Functions (BioASQ gold snippets + random rag-mini-bioasq passages as distractors)
 
 
-def doc_key_from_url(url):
-    return url.replace("/", "_").replace(":", "_")
-
-
-def snippet_key(text):
-    return hashlib.md5(text.encode("utf-8")).hexdigest()[:12]
-
-
 def bioasq_candidates(
     sample, passage_lookup, all_passage_ids, n_distractors, saved=None, seed=42
 ):
     """BioASQ gold snippets + random rag-mini-bioasq passages as distractors."""
-
-    # Gold snippets (doc_key = document URL, chunk_key = snippet hash, text = snippet text)
-    native = [
-        (doc_key_from_url(s["document"]), snippet_key(s["text"]), s["text"])
-        for s in sample["snippets"]
-    ]
-
     # Get corresponding distractor ID for each BioASQ question
     if saved is not None:
         distractor_ids = saved[str(sample["id"])]
@@ -157,12 +141,7 @@ def bioasq_candidates(
             sample["id"], all_passage_ids, n_distractors, seed
         )
 
-    distractors = [
-        (f"ragmini_{pid}", f"ragmini_{pid}", passage_lookup[pid])
-        for pid in distractor_ids
-    ]
-
-    return native + distractors
+    return build_pool(sample, distractor_ids, passage_lookup)
 
 
 def get_question(args, sample):
