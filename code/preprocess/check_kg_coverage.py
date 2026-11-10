@@ -15,7 +15,9 @@ from datasets import load_dataset
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 from pools import build_pool
 
-DATA = "../../data/bioasq"
+DATA = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "..", "data", "bioasq"
+)
 
 p = argparse.ArgumentParser()
 p.add_argument("--split", choices=["dev", "test"], required=True)

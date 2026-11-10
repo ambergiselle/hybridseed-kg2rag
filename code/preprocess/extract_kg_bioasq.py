@@ -33,7 +33,9 @@ sys.path.insert(
 from pools import build_pool
 from tqdm import tqdm
 
-DATA = "../../data/bioasq"
+DATA = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "..", "data", "bioasq"
+)
 
 
 def extract_triplets(llm, ctx, max_chars=3000):
@@ -152,7 +154,7 @@ def main():
     with ThreadPoolExecutor(max_workers=a.workers) as pool:
         futures = {
             pool.submit(extract_triplets, llm, text): (doc_key, chunk_key)
-            for doc_ket, chunk_key, text in todo
+            for doc_key, chunk_key, text in todo
         }
         for fut in tqdm(as_completed(futures), total=len(futures)):
             doc_key, chunk_key = futures[fut]
